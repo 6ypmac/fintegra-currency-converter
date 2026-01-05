@@ -3,6 +3,6 @@ export interface ConversionResult {
   to: string;
   amount: number;
   convertedAmount: number;
-  rate: number;
+  rate?: number;
   lastUpdated: string;
 }

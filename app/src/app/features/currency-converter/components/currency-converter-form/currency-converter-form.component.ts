@@ -30,9 +30,9 @@ import { MatSelectModule } from '@angular/material/select';
 import { MatInputModule } from '@angular/material/input';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 
-import { CurrencyOption } from '../../models/currency-option.model';
-import { ConversionRequest, EditedSide } from '../../models/conversion-request.model';
-import { ConversionResult } from '../../models/conversion-result.model';
+import { CurrencyOption } from '@app/features/currency-converter/models/currency-option.model';
+import { ConversionRequest, EditedSide } from '@app/features/currency-converter/models/conversion-request.model';
+import { ConversionResult } from '@app/features/currency-converter/models/conversion-result.model';
 
 type AmountParse =
   | { kind: 'empty' }
@@ -46,6 +46,8 @@ type ConverterFormControls = {
   fromAmount: FormControl<string>;
   toAmount: FormControl<string>;
 };
+
+type Initial = { from: string; to: string; amount: string };
 
 @Component({
   selector: 'app-currency-converter-form',
@@ -68,7 +70,6 @@ export class CurrencyConverterFormComponent implements OnInit, OnChanges {
 
   private static readonly ERR_NEGATIVE = 'Amount cannot be negative';
   private static readonly ERR_INVALID = 'Invalid number';
-  private static readonly ERR_SAME_CCY = 'Currencies must be different';
 
   private readonly nf = new Intl.NumberFormat('de-DE', {
     useGrouping: false,
@@ -76,69 +77,115 @@ export class CurrencyConverterFormComponent implements OnInit, OnChanges {
     maximumFractionDigits: 2,
   });
 
-  @Input({ required: true }) public currencies: ReadonlyArray<CurrencyOption> = [];
-  @Input() public loading = false;
-  @Input() public error: string | null = null;
-  @Input() public result: ConversionResult | null = null;
-  @Input() public lastEdited: EditedSide = 'from';
+  @Input({ required: true }) currencies: ReadonlyArray<CurrencyOption> = [];
+  @Input() initial: Initial | null = null;
+  @Input() loading = false;
+  @Input() result: ConversionResult | null = null;
+  @Input() lastEdited: EditedSide = 'from';
 
-  @Output() public readonly requestChange = new EventEmitter<ConversionRequest>();
+  @Output() readonly requestChange = new EventEmitter<ConversionRequest>();
 
-  private editedLocal: EditedSide = 'from';
-
-  public readonly form: FormGroup<ConverterFormControls> = this.fb.group(
+  readonly form: FormGroup<ConverterFormControls> = this.fb.group(
     {
       from: this.fb.control('EUR', { validators: [Validators.required] }),
       to: this.fb.control('USD', { validators: [Validators.required] }),
-
       fromAmount: this.fb.control('1', { validators: [this.amountStringValidator()] }),
       toAmount: this.fb.control('', { validators: [this.amountStringValidator()] }),
     },
     { validators: [this.differentCurrenciesValidator()] },
   );
 
-  public ngOnInit(): void {
+  private editedLocal: EditedSide = 'from';
+
+  private internalUpdate = false;
+
+  // for swap: remember previous values
+  private prevFrom = 'EUR';
+  private prevTo = 'USD';
+
+  ngOnInit(): void {
+    this.prevFrom = this.form.controls.from.value;
+    this.prevTo = this.form.controls.to.value;
     this.initStreams();
   }
 
-  public ngOnChanges(changes: SimpleChanges): void {
-    if (!changes['result'] || !this.result) return;
+  ngOnChanges(changes: SimpleChanges): void {
+    if (changes['currencies']) {
+      this.ensureSelectionsValid();
+      this.snapshotPair();
+    }
 
-    if (this.lastEdited === 'from') {
-      this.form.controls.toAmount.setValue(this.format2(this.result.convertedAmount), { emitEvent: false });
-    } else {
-      this.form.controls.fromAmount.setValue(this.format2(this.result.amount), { emitEvent: false });
+    if (changes['initial'] && this.initial) {
+      this.internalUpdate = true;
+
+      this.form.patchValue(
+        {
+          from: this.initial.from,
+          to: this.initial.to,
+          fromAmount: this.initial.amount,
+        },
+        { emitEvent: false },
+      );
+
+      this.ensureSelectionsValid();
+      this.form.updateValueAndValidity({ emitEvent: false });
+      this.snapshotPair();
+
+      this.internalUpdate = false;
+    }
+
+    if (changes['result'] && this.result) {
+      this.internalUpdate = true;
+
+      if (this.lastEdited === 'from') {
+        this.form.controls.toAmount.setValue(this.format2(this.result.convertedAmount), { emitEvent: false });
+      } else {
+        this.form.controls.fromAmount.setValue(this.format2(this.result.amount), { emitEvent: false });
+      }
+
+      this.internalUpdate = false;
     }
   }
 
-  public get fromAmountError(): string | null {
+  get fromAmountError(): string | null {
     return this.amountErrorOf(this.form.controls.fromAmount);
   }
 
-  public get toAmountError(): string | null {
+  get toAmountError(): string | null {
     return this.amountErrorOf(this.form.controls.toAmount);
   }
 
-  public get currencyError(): string | null {
-    return this.form.hasError('sameCurrency') ? CurrencyConverterFormComponent.ERR_SAME_CCY : null;
-  }
-
+  // -----------------------------
+  // streams
+  // -----------------------------
   private initStreams(): void {
     this.form.controls.fromAmount.valueChanges
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe(() => (this.editedLocal = 'from'));
+      .subscribe(() => {
+        if (!this.internalUpdate) this.editedLocal = 'from';
+      });
 
     this.form.controls.toAmount.valueChanges
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe(() => (this.editedLocal = 'to'));
+      .subscribe(() => {
+        if (!this.internalUpdate) this.editedLocal = 'to';
+      });
 
     this.form.controls.from.valueChanges
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe(() => this.ensureDifferentCurrencies('from'));
+      .subscribe((newFrom) => {
+        if (this.internalUpdate) return;
+        this.applySwapIfSame('from', newFrom);
+        this.form.updateValueAndValidity({ emitEvent: false });
+      });
 
     this.form.controls.to.valueChanges
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe(() => this.ensureDifferentCurrencies('to'));
+      .subscribe((newTo) => {
+        if (this.internalUpdate) return;
+        this.applySwapIfSame('to', newTo);
+        this.form.updateValueAndValidity({ emitEvent: false });
+      });
 
     merge(
       this.form.controls.from.valueChanges,
@@ -154,13 +201,74 @@ export class CurrencyConverterFormComponent implements OnInit, OnChanges {
       .subscribe((req) => this.requestChange.emit(req));
   }
 
-  private amountErrorOf(c: AbstractControl<string>): string | null {
-    if (!c.touched && !c.dirty) return null;
-    if (c.hasError('negative')) return CurrencyConverterFormComponent.ERR_NEGATIVE;
-    if (c.hasError('invalidNumber')) return CurrencyConverterFormComponent.ERR_INVALID;
-    return null;
+  // -----------------------------
+  // swap logic
+  // -----------------------------
+  private applySwapIfSame(changed: EditedSide, newValue: string): void {
+    const fromCtrl = this.form.controls.from;
+    const toCtrl = this.form.controls.to;
+
+    if (changed === 'from') {
+      if (newValue && newValue === toCtrl.value) {
+        this.internalUpdate = true;
+        toCtrl.setValue(this.prevFrom, { emitEvent: false });
+        this.internalUpdate = false;
+      }
+    } else {
+      if (newValue && newValue === fromCtrl.value) {
+        this.internalUpdate = true;
+        fromCtrl.setValue(this.prevTo, { emitEvent: false });
+        this.internalUpdate = false;
+      }
+    }
+
+    this.snapshotPair();
   }
 
+  private snapshotPair(): void {
+    this.prevFrom = this.form.controls.from.value;
+    this.prevTo = this.form.controls.to.value;
+  }
+
+  // -----------------------------
+  // selection guard
+  // -----------------------------
+  private ensureSelectionsValid(): void {
+    if (!this.currencies?.length) return;
+
+    const has = (code: string) => this.currencies.some((c) => c.code === code);
+
+    const fromCtrl = this.form.controls.from;
+    const toCtrl = this.form.controls.to;
+
+    if (!has(fromCtrl.value)) {
+      this.internalUpdate = true;
+      fromCtrl.setValue(this.currencies[0].code, { emitEvent: false });
+      this.internalUpdate = false;
+    }
+
+    if (!has(toCtrl.value) || toCtrl.value === fromCtrl.value) {
+      const fallbackTo = this.currencies.find((c) => c.code !== fromCtrl.value)?.code ?? fromCtrl.value;
+
+      this.internalUpdate = true;
+      toCtrl.setValue(fallbackTo, { emitEvent: false });
+      this.internalUpdate = false;
+    }
+  }
+
+  private differentCurrenciesValidator(): ValidatorFn {
+    return (control: AbstractControl): ValidationErrors | null => {
+      const group = control as unknown as { value: ConverterFormControls };
+      const { from, to } = group.value ?? ({} as ConverterFormControls);
+
+      if (!from || !to) return null;
+      return from === to ? { sameCurrency: true } : null;
+    };
+  }
+
+  // -----------------------------
+  // build request
+  // -----------------------------
   private buildRequestOrNull(): ConversionRequest | null {
     const { from, to, fromAmount, toAmount } = this.form.getRawValue();
     if (!from || !to) return null;
@@ -169,8 +277,9 @@ export class CurrencyConverterFormComponent implements OnInit, OnChanges {
     const raw = this.editedLocal === 'from' ? fromAmount : toAmount;
     const parsed = this.parseAmount(raw);
 
-    const otherCtrl =
-      this.editedLocal === 'from' ? this.form.controls.toAmount : this.form.controls.fromAmount;
+    const otherCtrl = this.editedLocal === 'from'
+      ? this.form.controls.toAmount
+      : this.form.controls.fromAmount;
 
     if (parsed.kind === 'empty' || parsed.kind === 'invalid' || parsed.kind === 'inProgress') {
       otherCtrl.setValue('', { emitEvent: false });
@@ -180,37 +289,24 @@ export class CurrencyConverterFormComponent implements OnInit, OnChanges {
     return { from, to, amount: parsed.value, edited: this.editedLocal };
   }
 
-  private ensureDifferentCurrencies(changed: EditedSide): void {
-    const { from, to } = this.form.getRawValue();
-    if (!from || !to) return;
-    if (from !== to) return;
-
-    const fallback = this.currencies.find((c) => c.code !== from)?.code ?? '';
-    if (!fallback) return;
-
-    if (changed === 'from') {
-      this.form.controls.to.setValue(fallback, { emitEvent: false });
-    } else {
-      this.form.controls.from.setValue(fallback, { emitEvent: false });
-    }
-
-    this.form.updateValueAndValidity({ emitEvent: false });
-  }
-
-  private differentCurrenciesValidator(): ValidatorFn {
-    return (control: AbstractControl): ValidationErrors | null => {
-      const group = control as unknown as { value: ConverterFormControls };
-      const { from, to } = group.value ?? ({} as ConverterFormControls);
-      if (!from || !to) return null;
-      return from === to ? { sameCurrency: true } : null;
-    };
-  }
-
+  // -----------------------------
+  // parsing
+  // -----------------------------
   private parseAmount(raw: string): AmountParse {
     const v = (raw ?? '').trim();
 
     if (v === '') return { kind: 'empty' };
     if (v.startsWith('-')) return { kind: 'invalid', reason: 'negative' };
+
+    // allow ".5" / ",5" => treat as "0.5"
+    if ((v.startsWith('.') || v.startsWith(',')) && v.length > 1) {
+      const tail = v.slice(1);
+      if (/^\d+$/.test(tail)) {
+        return this.parseAmount('0' + v);
+      }
+    }
+
+    // in progress: ".", "," or trailing separator
     if (v === '.' || v === ',' || /[.,]$/.test(v)) return { kind: 'inProgress' };
 
     const normalized = v.replace(',', '.');
@@ -226,11 +322,20 @@ export class CurrencyConverterFormComponent implements OnInit, OnChanges {
   private amountStringValidator(): ValidatorFn {
     return (control: AbstractControl<string>): ValidationErrors | null => {
       const parsed = this.parseAmount(control.value ?? '');
+
       if (parsed.kind === 'invalid') {
         return parsed.reason === 'negative' ? { negative: true } : { invalidNumber: true };
       }
+
       return null;
     };
+  }
+
+  private amountErrorOf(c: AbstractControl<string>): string | null {
+    if (!c.touched && !c.dirty) return null;
+    if (c.hasError('negative')) return CurrencyConverterFormComponent.ERR_NEGATIVE;
+    if (c.hasError('invalidNumber')) return CurrencyConverterFormComponent.ERR_INVALID;
+    return null;
   }
 
   private format2(v: number): string {

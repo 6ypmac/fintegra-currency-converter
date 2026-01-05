@@ -1,8 +1,10 @@
-<app-currency-converter-form
-  [currencies]="currencies"
-  [loading]="loading"
-  [error]="error"
-  [result]="result"
-  [lastEdited]="lastEdited"
-  (requestChange)="onRequestChange($event)"
-/>
+@if (vm$ | async; as vm) {
+  <app-currency-converter-form
+    [currencies]="vm.currencies"
+    [initial]="vm.initial"
+    [loading]="vm.loading"
+    [result]="vm.result"
+    [lastEdited]="vm.lastEdited"
+    (requestChange)="onRequestChange($event)"
+  />
+}

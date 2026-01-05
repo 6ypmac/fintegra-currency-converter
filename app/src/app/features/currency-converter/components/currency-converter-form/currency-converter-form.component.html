@@ -34,7 +34,7 @@
 
       <mat-hint>
         @if (loading) { Updating… }
-        @else if (result) { Rate: 1 {{ result.from }} = {{ result.rate }} {{ result.to }} }
+        @else if (result) { Rate: 1 {{ result.from }} = {{ result.rate | number:'1.0-2' }} {{ result.to }} }
       </mat-hint>
     </mat-form-field>
 
