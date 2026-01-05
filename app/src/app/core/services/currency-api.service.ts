@@ -3,22 +3,20 @@ import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable, map } from 'rxjs';
 import { environment } from '@env/environment';
 
-import { CurrencyOption } from '@app/features/currency-converter/models/currency-option.model';
-import { ConversionResult } from '@app/features/currency-converter/models/conversion-result.model';
+export type CurrencyOption = { code: string; name: string };
 
-// ===== CurrencyBeacon API types =====
+export type ConversionResult = {
+  from: string;
+  to: string;
+  amount: number;
+  convertedAmount: number;
+  rate: number;
+  lastUpdated: string;
+};
 
 type CurrencyBeaconCurrency = {
-  id: number;
   name: string;
-  short_code: string;  // "USD", "EUR"
-  code: string;        // numeric ISO
-  precision?: number;
-  subunit?: number;
-  symbol?: string;
-  symbol_first?: boolean;
-  decimal_mark?: string;
-  thousands_separator?: string;
+  short_code: string;
 };
 
 type CurrencyBeaconCurrenciesResponse = {
@@ -32,7 +30,6 @@ type CurrencyBeaconConvertResponse = {
     amount: number;
     value: number;
     rate?: number;
-    timestamp?: number;
     date?: string;
   };
 };
@@ -40,37 +37,32 @@ type CurrencyBeaconConvertResponse = {
 @Injectable({ providedIn: 'root' })
 export class CurrencyApiService {
   private readonly http = inject(HttpClient);
-
   private readonly baseUrl = environment.currencyBeacon.baseUrl;
   private readonly apiKey = environment.currencyBeacon.apiKey;
 
-  private withKey(params?: HttpParams): HttpParams {
+  private paramsWithKey(params?: HttpParams): HttpParams {
     return (params ?? new HttpParams()).set('api_key', this.apiKey);
   }
 
-  public getCurrencies(type: 'fiat' | 'crypto' = 'fiat'): Observable<CurrencyOption[]> {
-    const params = this.withKey(new HttpParams().set('type', type));
+  getCurrencies(type: 'fiat' | 'crypto' = 'fiat'): Observable<CurrencyOption[]> {
+    const params = this.paramsWithKey(new HttpParams().set('type', type));
 
     return this.http
       .get<CurrencyBeaconCurrenciesResponse>(`${this.baseUrl}/currencies`, { params })
       .pipe(
         map((res) =>
-          Object.values(res.response)
-            .map((v) => ({
-              code: v.short_code,
-              name: v.name,
-            }))
-            .sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' })),
+          Object.values(res.response).map((c) => ({
+            code: c.short_code,
+            name: c.name,
+          })),
         ),
+        map((list) => list.sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }))),
       );
   }
 
-  public convert(from: string, to: string, amount: number): Observable<ConversionResult> {
-    const params = this.withKey(
-      new HttpParams()
-        .set('from', from)
-        .set('to', to)
-        .set('amount', String(amount)),
+  convert(from: string, to: string, amount: number): Observable<ConversionResult> {
+    const params = this.paramsWithKey(
+      new HttpParams().set('from', from).set('to', to).set('amount', String(amount)),
     );
 
     return this.http
@@ -78,15 +70,21 @@ export class CurrencyApiService {
       .pipe(
         map((res) => {
           const r = res.response;
+          const computedRate =
+            typeof r.rate === 'number' && Number.isFinite(r.rate)
+              ? r.rate
+              : r.amount > 0
+                ? r.value / r.amount
+                : 0;
 
           return {
             from: r.from,
             to: r.to,
             amount: r.amount,
             convertedAmount: r.value,
-            rate: r.rate,
+            rate: computedRate,
             lastUpdated: r.date ?? new Date().toISOString(),
-          } satisfies ConversionResult;
+          };
         }),
       );
   }

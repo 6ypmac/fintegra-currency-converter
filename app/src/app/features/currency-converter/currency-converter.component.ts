@@ -1,255 +1,128 @@
-import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
+import { ChangeDetectionStrategy, Component, OnInit, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { CurrencyConverterFormComponent } from './components/currency-converter-form/currency-converter-form.component';
+import { FormControl, FormGroup, NonNullableFormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 
-import { CurrencyApiService } from '@app/core/services/currency-api.service';
-import { CurrencyOption } from './models/currency-option.model';
-import { ConversionRequest, EditedSide } from './models/conversion-request.model';
-import { ConversionResult } from './models/conversion-result.model';
+import { MatFormFieldModule } from '@angular/material/form-field';
+import { MatSelectModule } from '@angular/material/select';
+import { MatInputModule } from '@angular/material/input';
+import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 
-import { Observable, Subject, combineLatest, merge, of } from 'rxjs';
-import {
-  catchError,
-  distinctUntilChanged,
-  filter,
-  map,
-  shareReplay,
-  startWith,
-  switchMap,
-} from 'rxjs/operators';
+import { CurrencyApiService, CurrencyOption, ConversionResult } from '@app/core/services/currency-api.service';
+import { Observable, of } from 'rxjs';
+import { catchError, debounceTime, distinctUntilChanged, finalize, startWith, switchMap, tap } from 'rxjs/operators';
 
-type InitialForm = { from: string; to: string; amount: string };
-
-type ConversionResultWithRate = ConversionResult & { rate: number };
-
-type PairRateState = {
-  from: string;
-  to: string;
-  rate: number;
-  lastUpdated: string;
-  loading: boolean;
-  error: string | null;
+type ConverterForm = {
+  from: FormControl<string>;
+  to: FormControl<string>;
+  amount: FormControl<string>;
 };
 
 @Component({
   selector: 'app-currency-converter',
   standalone: true,
-  imports: [CommonModule, CurrencyConverterFormComponent],
+  imports: [
+    CommonModule,
+    ReactiveFormsModule,
+    MatFormFieldModule,
+    MatSelectModule,
+    MatInputModule,
+    MatProgressSpinnerModule,
+  ],
   templateUrl: './currency-converter.component.html',
   styleUrl: './currency-converter.component.scss',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class CurrencyConverterComponent {
+export class CurrencyConverterComponent implements OnInit {
   private readonly api = inject(CurrencyApiService);
+  private readonly fb = inject(NonNullableFormBuilder);
 
-  private readonly userRequests$ = new Subject<ConversionRequest>();
+  currencies: ReadonlyArray<CurrencyOption> = [];
 
-  // -----------------------------
-  // Currencies
-  // -----------------------------
-  readonly currencies$: Observable<ReadonlyArray<CurrencyOption>> = this.api.getCurrencies('fiat').pipe(
-    catchError(() => of([] as CurrencyOption[])),
-    shareReplay({ bufferSize: 1, refCount: true }),
-  );
+  loading = false;
+  error: string | null = null;
 
-  readonly currenciesLoading$: Observable<boolean> = this.currencies$.pipe(
-    map((list) => list.length === 0),
-    startWith(true),
-  );
+  result: ConversionResult | null = null;
 
-  readonly currenciesError$: Observable<string | null> = this.api.getCurrencies('fiat').pipe(
-    map(() => null),
-    startWith(null),
-    catchError(() => of('Failed to load currencies')),
-    shareReplay({ bufferSize: 1, refCount: true }),
-  );
+  readonly form: FormGroup<ConverterForm> = this.fb.group({
+    from: this.fb.control('EUR', { validators: [Validators.required] }),
+    to: this.fb.control('USD', { validators: [Validators.required] }),
+    amount: this.fb.control('1', { validators: [Validators.required] }),
+  });
 
-  // -----------------------------
-  // Initial form (once list is ready)
-  // -----------------------------
-  readonly initial$: Observable<InitialForm | null> = this.currencies$.pipe(
-    map((list) => (list.length ? this.pickInitial(list) : null)),
-    startWith(null),
-    shareReplay({ bufferSize: 1, refCount: true }),
-  );
+  ngOnInit(): void {
+    // 1) load currencies + ensure defaults exist
+    this.api.getCurrencies('fiat').subscribe({
+      next: (list) => {
+        this.currencies = list;
 
-  // -----------------------------
-  // Requests (initial + user)
-  // -----------------------------
-  readonly requests$: Observable<ConversionRequest> = merge(
-    this.initial$.pipe(
-      filter((v): v is InitialForm => v !== null),
-      map((init) => ({
-        from: init.from,
-        to: init.to,
-        amount: Number(init.amount) || 1,
-        edited: 'from' as const,
-      })),
-    ),
-    this.userRequests$,
-  ).pipe(
-    distinctUntilChanged((a, b) =>
-      a.from === b.from &&
-      a.to === b.to &&
-      a.amount === b.amount &&
-      a.edited === b.edited,
-    ),
-    shareReplay({ bufferSize: 1, refCount: true }),
-  );
+        const codes = new Set(list.map((c) => c.code));
+        const from = codes.has('EUR') ? 'EUR' : (list[0]?.code ?? 'EUR');
+        const to = codes.has('USD')
+          ? 'USD'
+          : (list.find((c) => c.code !== from)?.code ?? 'USD');
 
-  readonly lastEdited$: Observable<EditedSide> = this.requests$.pipe(
-    map((r) => r.edited),
-    startWith('from' as EditedSide),
-  );
+        this.form.patchValue({ from, to, amount: '1' }, { emitEvent: true });
+      },
+      error: () => {
+        this.error = 'Failed to load currencies';
+      },
+    });
 
-  // -----------------------------
-  // Rate (API call only on pair change)
-  // -----------------------------
-  readonly pairRate$: Observable<PairRateState> = this.requests$.pipe(
-    map((r) => ({ from: r.from, to: r.to })),
-    distinctUntilChanged((a, b) => a.from === b.from && a.to === b.to),
-
-    switchMap(({ from, to }) =>
-      this.api.convert(from, to, 1).pipe(
-        map((res) => this.ensureRate(res)),
-        map((res) => ({
-          from,
-          to,
-          rate: res.rate,
-          lastUpdated: res.lastUpdated,
-          loading: false,
-          error: null,
-        })),
-        startWith({
-          from,
-          to,
-          rate: 0,
-          lastUpdated: '',
-          loading: true,
-          error: null,
-        }),
-        catchError(() =>
-          of({
-            from,
-            to,
-            rate: 0,
-            lastUpdated: '',
-            loading: false,
-            error: 'Conversion failed',
-          }),
-        ),
-      ),
-    ),
-    startWith({
-      from: 'EUR',
-      to: 'USD',
-      rate: 0,
-      lastUpdated: '',
-      loading: false,
-      error: null,
-    }),
-    shareReplay({ bufferSize: 1, refCount: true }),
-  );
-
-  // -----------------------------
-  // Result computed locally from cached rate
-  // -----------------------------
-  readonly result$: Observable<ConversionResult | null> = combineLatest([this.requests$, this.pairRate$]).pipe(
-    map(([req, rateState]) => {
-      if (rateState.loading) return null;
-      if (rateState.error) return null;
-
-      // ignore stale rate
-      if (rateState.from !== req.from || rateState.to !== req.to) return null;
-
-      return this.computeWithRate(req, rateState.rate, rateState.lastUpdated);
-    }),
-    startWith(null),
-    shareReplay({ bufferSize: 1, refCount: true }),
-  );
-
-  // -----------------------------
-  // VM for template
-  // -----------------------------
-  readonly vm$ = combineLatest({
-    currencies: this.currencies$,
-    initial: this.initial$,
-    pairRate: this.pairRate$,
-    result: this.result$,
-    lastEdited: this.lastEdited$,
-    currenciesError: this.currenciesError$,
-  }).pipe(
-    map(({ currencies, initial, pairRate, result, lastEdited, currenciesError }) => {
-      const loading = pairRate.loading;
-      const error = currenciesError ?? pairRate.error;
-
-      return {
-        currencies,
-        initial,
-        loading,
-        error,
-        result,
-        lastEdited,
-      };
-    }),
-    shareReplay({ bufferSize: 1, refCount: true }),
-  );
-
-  // -----------------------------
-  // events
-  // -----------------------------
-  onRequestChange(req: ConversionRequest): void {
-    this.userRequests$.next(req);
+    // 2) conversion stream (simple)
+    this.setupConversion();
   }
 
-  // -----------------------------
-  // helpers
-  // -----------------------------
-  private pickInitial(list: ReadonlyArray<CurrencyOption>): InitialForm {
-    const codes = new Set(list.map((c) => c.code));
+  private setupConversion(): void {
+    const from$ = this.form.controls.from.valueChanges.pipe(startWith(this.form.controls.from.value));
+    const to$ = this.form.controls.to.valueChanges.pipe(startWith(this.form.controls.to.value));
+    const amount$ = this.form.controls.amount.valueChanges.pipe(
+      startWith(this.form.controls.amount.value),
+      debounceTime(300),
+      distinctUntilChanged(),
+    );
 
-    const from = codes.has('EUR') ? 'EUR' : (list[0]?.code ?? 'EUR');
-    const to =
-      codes.has('USD')
-        ? 'USD'
-        : (list.find((c) => c.code !== from)?.code ?? 'USD');
+    from$.pipe(
+      switchMap(() => this.buildConversion$()),
+    ).subscribe();
 
-    return { from, to, amount: '1' };
+    to$.pipe(
+      switchMap(() => this.buildConversion$()),
+    ).subscribe();
+
+    amount$.pipe(
+      switchMap(() => this.buildConversion$()),
+    ).subscribe();
   }
 
-  private ensureRate(res: ConversionResult): ConversionResultWithRate {
-    const rate =
-      typeof res.rate === 'number' && Number.isFinite(res.rate) && res.rate > 0
-        ? res.rate
-        : res.amount > 0 && Number.isFinite(res.convertedAmount)
-          ? res.convertedAmount / res.amount
-          : 0;
+  private buildConversion$(): Observable<ConversionResult | null> {
+    const from = this.form.controls.from.value;
+    const to = this.form.controls.to.value;
+    const rawAmount = this.form.controls.amount.value;
 
-    return { ...res, rate };
-  }
+    const amount = Number(String(rawAmount).replace(',', '.'));
 
-  private computeWithRate(req: ConversionRequest, rate: number, lastUpdated: string): ConversionResult {
-    const r = Number.isFinite(rate) && rate > 0 ? rate : 0;
-
-    if (req.edited === 'from') {
-      return {
-        from: req.from,
-        to: req.to,
-        amount: req.amount,
-        convertedAmount: r === 0 ? 0 : req.amount * r,
-        rate: r,
-        lastUpdated,
-      };
+    if (!from || !to) return of(null);
+    if (from === to) {
+      this.error = 'Currencies must be different';
+      this.result = null;
+      return of(null);
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      this.result = null;
+      return of(null);
     }
 
-    // edited === 'to': req.amount means "to amount"
-    return {
-      from: req.from,
-      to: req.to,
-      amount: r === 0 ? 0 : req.amount / r,
-      convertedAmount: req.amount,
-      rate: r,
-      lastUpdated,
-    };
+    this.loading = true;
+    this.error = null;
+
+    return this.api.convert(from, to, amount).pipe(
+      tap((res) => (this.result = res)),
+      catchError(() => {
+        this.error = 'Conversion failed';
+        this.result = null;
+        return of(null);
+      }),
+      finalize(() => (this.loading = false)),
+    );
   }
 }
