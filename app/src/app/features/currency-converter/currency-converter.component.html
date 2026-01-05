@@ -1,1 +1,8 @@
-<p>currency-converter works!</p>
+<app-currency-converter-form
+  [currencies]="currencies"
+  [loading]="loading"
+  [error]="error"
+  [result]="result"
+  [lastEdited]="lastEdited"
+  (requestChange)="onRequestChange($event)"
+/>
