@@ -1,41 +1,69 @@
 <div class="converter">
-  <mat-form-field appearance="outline">
-    <mat-label>From</mat-label>
-    <mat-select [formControl]="form.controls.from">
-      <mat-option *ngFor="let c of currencies" [value]="c.code">
-        {{ c.name }} ({{ c.code }})
-      </mat-option>
-    </mat-select>
-  </mat-form-field>
+  @if (vm$ | async; as vm) {
+    <div class="row">
+      <mat-form-field appearance="outline" class="amount">
+        <mat-label>Amount</mat-label>
+        <input
+          matInput
+          [formControl]="form.controls.amount"
+          inputmode="decimal"
+        />
+      </mat-form-field>
 
-  <mat-form-field appearance="outline">
-    <mat-label>To</mat-label>
-    <mat-select [formControl]="form.controls.to">
-      <mat-option *ngFor="let c of currencies" [value]="c.code">
-        {{ c.name }} ({{ c.code }})
-      </mat-option>
-    </mat-select>
-  </mat-form-field>
+      <mat-form-field appearance="outline" class="currency">
+        <mat-label>From</mat-label>
+        <mat-select [formControl]="form.controls.from">
+          @for (c of vm.currencies; track c.code) {
+            <mat-option [value]="c.code">
+              {{ c.name }} ({{ c.code }})
+            </mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+    </div>
 
-  <mat-form-field appearance="outline">
-    <mat-label>Amount</mat-label>
-    <input matInput [formControl]="form.controls.amount" inputmode="decimal" />
-  </mat-form-field>
+    <div class="row">
+      <mat-form-field appearance="outline" class="amount">
+        <mat-label>Converted</mat-label>
 
-  <mat-form-field appearance="outline">
-    <mat-label>Converted</mat-label>
-    <input matInput [value]="result?.convertedAmount ?? ''" readonly />
-    <mat-hint>
-      <ng-container *ngIf="loading; else hintRate">Updating…</ng-container>
-      <ng-template #hintRate>
-        <ng-container *ngIf="result">
-          Rate: 1 {{ result.from }} = {{ result.rate }} {{ result.to }}
-        </ng-container>
-      </ng-template>
-    </mat-hint>
-  </mat-form-field>
+        <input
+          matInput
+          [value]="vm.result?.convertedAmount | number:'1.0-2'"
+          readonly
+        />
 
-  <mat-progress-spinner *ngIf="loading" mode="indeterminate" diameter="24"></mat-progress-spinner>
+        <mat-hint>
+          @if (vm.loading) {
+            Updating…
+          } @else if (vm.result) {
+            Rate: 1 {{ vm.result.from }} = {{ vm.result.rate | number:'1.0-6' }} {{ vm.result.to }}
+          }
+        </mat-hint>
+      </mat-form-field>
 
-  <div *ngIf="error" class="error">{{ error }}</div>
+      <mat-form-field appearance="outline" class="currency">
+        <mat-label>To</mat-label>
+        <mat-select [formControl]="form.controls.to">
+          @for (c of vm.currencies; track c.code) {
+            <mat-option [value]="c.code">
+              {{ c.name }} ({{ c.code }})
+            </mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      @if (vm.loading) {
+        <mat-progress-spinner
+          class="spinner"
+          mode="indeterminate"
+          diameter="22"
+          aria-label="Loading"
+        />
+      }
+    </div>
+
+    @if (vm.error) {
+      <div class="error">{{ vm.error }}</div>
+    }
+  }
 </div>
