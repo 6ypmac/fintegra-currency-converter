@@ -1,18 +1,13 @@
-<div class="converter">
+<div class="converter" [formGroup]="form">
   <div class="row">
     <mat-form-field appearance="outline" class="amount">
       <mat-label>Amount</mat-label>
-      <input
-        matInput
-        inputmode="decimal"
-        [value]="amountText()"
-        (input)="onAmountInput($event.target.value)"
-      />
+      <input matInput inputmode="decimal" formControlName="amount" />
     </mat-form-field>
 
     <mat-form-field appearance="outline" class="currency">
       <mat-label>From</mat-label>
-      <mat-select [value]="from()" (valueChange)="onFromChange($event)">
+      <mat-select formControlName="from">
         @for (currency of currencies(); track currency.code) {
           <mat-option [value]="currency.code">
             {{ currency.name }} ({{ currency.code }})
@@ -28,7 +23,7 @@
 
       <input
         matInput
-        [value]="displayedResult()?.convertedAmount ?? ''"
+        [value]="displayedResult()?.convertedAmount | number:'1.0-2'"
         readonly
       />
 
@@ -45,7 +40,7 @@
 
     <mat-form-field appearance="outline" class="currency">
       <mat-label>To</mat-label>
-      <mat-select [value]="to()" (valueChange)="onToChange($event)">
+      <mat-select formControlName="to">
         @for (currency of currencies(); track currency.code) {
           <mat-option [value]="currency.code">
             {{ currency.name }} ({{ currency.code }})
