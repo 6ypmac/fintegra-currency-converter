@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
+import { Component, OnDestroy, OnInit, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormControl, FormGroup, NonNullableFormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 
@@ -8,9 +8,7 @@ import { MatInputModule } from '@angular/material/input';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 
 import { CurrencyApiService, CurrencyOption, ConversionResult } from '@app/core/services/currency-api.service';
-
-import { Observable, combineLatest, of } from 'rxjs';
-import { catchError, distinctUntilChanged, map, shareReplay, startWith, switchMap, tap } from 'rxjs/operators';
+import { Subscription, firstValueFrom } from 'rxjs';
 
 type ConverterForm = {
   from: FormControl<string>;
@@ -24,31 +22,12 @@ type AmountParse =
   | { kind: 'invalid' }
   | { kind: 'valid'; value: number };
 
-type Vm = {
-  currencies: ReadonlyArray<CurrencyOption>;
-  loading: boolean;
-  error: string | null;
-  result: ConversionResult | null;
-};
-
 const ERR = {
   currencies: 'Failed to load currencies',
   pairSame: 'Currencies must be different',
   amount: 'Invalid amount',
   convert: 'Conversion failed',
 } as const;
-
-type CurrenciesState = {
-  list: ReadonlyArray<CurrencyOption>;
-  loading: boolean;
-  error: string | null;
-};
-
-type ConversionState = {
-  loading: boolean;
-  error: string | null;
-  result: ConversionResult | null;
-};
 
 @Component({
   selector: 'app-currency-converter',
@@ -63,137 +42,168 @@ type ConversionState = {
   ],
   templateUrl: './currency-converter.component.html',
   styleUrl: './currency-converter.component.scss',
-  changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class CurrencyConverterComponent {
+export class CurrencyConverterComponent implements OnInit, OnDestroy {
   private readonly api = inject(CurrencyApiService);
   private readonly fb = inject(NonNullableFormBuilder);
 
-  // Form defaults are optimistic UI defaults.
-  // Real defaults are re-applied once currencies are loaded (see applyDefaults()).
   readonly form: FormGroup<ConverterForm> = this.fb.group({
     from: this.fb.control('EUR', { validators: [Validators.required] }),
     to: this.fb.control('USD', { validators: [Validators.required] }),
     amount: this.fb.control('1', { validators: [Validators.required] }),
   });
 
-  // Keeps the last successful conversion so the UI doesn't flicker to empty
-  // while the user is typing a decimal separator ("1." / "1,") or while a request is in-flight.
+  currencies: ReadonlyArray<CurrencyOption> = [];
+
+  loading = false;
+  error: string | null = null;
+  result: ConversionResult | null = null;
+
   private lastResult: ConversionResult | null = null;
 
-  // Currencies are loaded once and shared across the template.
-  // shareReplay prevents multiple HTTP calls when vm$ is subscribed by async pipe.
-  private readonly currenciesState$: Observable<CurrenciesState> = this.api.getCurrencies('fiat').pipe(
-    tap((list) => this.applyDefaults(list)), // Ensure form selects match available options after load.
-    map((list) => ({ list, loading: false, error: null })),
-    startWith({ list: [] as CurrencyOption[], loading: true, error: null }),
-    catchError(() => of({ list: [] as CurrencyOption[], loading: false, error: ERR.currencies })),
-    shareReplay({ bufferSize: 1, refCount: true }),
-  );
+  private subscriptions = new Subscription();
 
-  // startWith makes the initial conversion run immediately using current form values.
-  private readonly from$ = this.form.controls.from.valueChanges.pipe(
-    startWith(this.form.controls.from.value),
-    distinctUntilChanged(),
-  );
+  private debounceHandle: number | null = null;
 
-  // startWith makes the initial conversion run immediately using current form values.
-  private readonly to$ = this.form.controls.to.valueChanges.pipe(
-    startWith(this.form.controls.to.value),
-    distinctUntilChanged(),
-  );
+  // Used to ignore late responses from older requests (classic race condition fix).
+  private requestId = 0;
 
-  // Parse user input into a small state machine so we can treat "1." as "still typing".
-  private readonly amount$ = this.form.controls.amount.valueChanges.pipe(
-    startWith(this.form.controls.amount.value),
-    distinctUntilChanged(),
-    map((raw) => this.parseAmount(raw)),
-  );
+  async ngOnInit(): Promise<void> {
+    await this.loadCurrencies();
 
-  // Conversion pipeline:
-  // - validates inputs
-  // - preserves lastResult while user is typing a decimal separator
-  // - performs API call for valid amount and caches the result into lastResult
-  private readonly conversionState$: Observable<ConversionState> =
-    combineLatest([this.from$, this.to$, this.amount$]).pipe(
-      switchMap(([from, to, amount]) => {
-        if (!from || !to) {
-          return of({ loading: false, error: null, result: this.lastResult });
-        }
-
-        if (from === to) {
-          return of({ loading: false, error: ERR.pairSame, result: null });
-        }
-
-        // User is still typing ("1." / "1,") -> keep showing lastResult instead of clearing the output.
-        if (amount.kind === 'empty' || amount.kind === 'inProgress') {
-          return of({ loading: false, error: null, result: this.lastResult });
-        }
-
-        if (amount.kind === 'invalid') {
-          return of({ loading: false, error: ERR.amount, result: null });
-        }
-
-        return this.api.convert(from, to, amount.value).pipe(
-          tap((res) => (this.lastResult = res)),
-          map((res) => ({ loading: false, error: null, result: res })),
-          startWith({ loading: true, error: null, result: this.lastResult }),
-          catchError(() => of({ loading: false, error: ERR.convert, result: this.lastResult })),
-        );
+    // One subscription for all inputs (simple + predictable).
+    this.subscriptions.add(
+      this.form.valueChanges.subscribe(() => {
+        this.scheduleConversion();
       }),
     );
 
-  // ViewModel for the template: keeps template simple and avoids manual subscriptions in the component.
-  readonly vm$: Observable<Vm> = combineLatest([this.currenciesState$, this.conversionState$]).pipe(
-    map(([curr, conv]) => ({
-      currencies: curr.list,
-      loading: curr.loading || conv.loading,
-      error: curr.error ?? conv.error,
-      result: conv.result,
-    })),
-  );
+    // Run initial conversion after init
+    this.scheduleConversion();
+  }
 
-  // Picks a valid default pair from the loaded currencies list.
-  // Prefers EUR->USD when available, otherwise falls back to the first available codes.
-  // Also ensures from !== to.
+  ngOnDestroy(): void {
+    this.subscriptions.unsubscribe();
+
+    if (this.debounceHandle !== null) {
+      window.clearTimeout(this.debounceHandle);
+      this.debounceHandle = null;
+    }
+  }
+
+  // -----------------------------
+  // Loading currencies (async/await + try/catch)
+  // -----------------------------
+  private async loadCurrencies(): Promise<void> {
+    this.loading = true;
+    this.error = null;
+
+    try {
+      const list = await firstValueFrom(this.api.getCurrencies('fiat'));
+      this.currencies = list;
+      this.applyDefaults(list);
+    } catch {
+      this.currencies = [];
+      this.error = ERR.currencies;
+    } finally {
+      this.loading = false;
+    }
+  }
+
+  // -----------------------------
+  // Conversion flow (imperative)
+  // -----------------------------
+  private scheduleConversion(): void {
+    if (this.debounceHandle !== null) {
+      window.clearTimeout(this.debounceHandle);
+    }
+
+    this.debounceHandle = window.setTimeout(() => {
+      this.debounceHandle = null;
+      void this.runConversion();
+    }, 250);
+  }
+
+  private async runConversion(): Promise<void> {
+    const { from, to, amount } = this.form.getRawValue();
+
+    if (!from || !to) {
+      this.error = null;
+      this.result = this.lastResult;
+      return;
+    }
+
+    if (from === to) {
+      this.error = ERR.pairSame;
+      this.result = null;
+      return;
+    }
+
+    const parsed = this.parseAmount(amount);
+
+    // While user types "1." / "1," keep previous output (no flicker, no wrong value).
+    if (parsed.kind === 'empty' || parsed.kind === 'inProgress') {
+      this.error = null;
+      this.result = this.lastResult;
+      return;
+    }
+
+    if (parsed.kind === 'invalid') {
+      this.error = ERR.amount;
+      this.result = null;
+      return;
+    }
+
+    const currentRequest = ++this.requestId;
+
+    this.loading = true;
+    this.error = null;
+    this.result = this.lastResult;
+
+    try {
+      const res = await firstValueFrom(this.api.convert(from, to, parsed.value));
+
+      // Ignore stale responses
+      if (currentRequest !== this.requestId) return;
+
+      this.lastResult = res;
+      this.result = res;
+    } catch {
+      if (currentRequest !== this.requestId) return;
+
+      this.error = ERR.convert;
+      this.result = this.lastResult;
+    } finally {
+      if (currentRequest === this.requestId) {
+        this.loading = false;
+      }
+    }
+  }
+
+  // -----------------------------
+  // Helpers
+  // -----------------------------
   private applyDefaults(list: ReadonlyArray<CurrencyOption>): void {
     if (!list.length) return;
 
-    const availableCodes = new Set(list.map((currency) => currency.code));
+    const codes = new Set(list.map((currency) => currency.code));
+
     const current = this.form.getRawValue();
 
-    const preferredFrom = availableCodes.has('EUR') ? 'EUR' : list[0].code;
+    const from = codes.has(current.from) ? current.from : (codes.has('EUR') ? 'EUR' : list[0].code);
 
-    const from = availableCodes.has(current.from) ? current.from : preferredFrom;
+    let to = codes.has(current.to) ? current.to : (codes.has('USD') ? 'USD' : '');
 
-    let to: string;
-    if (availableCodes.has(current.to)) {
-      to = current.to;
-    } else if (availableCodes.has('USD')) {
-      to = 'USD';
-    } else {
+    if (!to || to === from) {
       const alternative = list.find((currency) => currency.code !== from);
       to = alternative ? alternative.code : from;
     }
 
-    // keep pair valid
-    if (to === from) {
-      const alternative = list.find((currency) => currency.code !== from);
-      if (alternative) {
-        to = alternative.code;
-      }
-    }
-
     if (current.from !== from || current.to !== to) {
-      this.form.patchValue({ from, to }, { emitEvent: true });
+      this.form.patchValue({ from, to }, { emitEvent: false });
     }
   }
 
-  // Amount parsing rules:
-  // - empty => no conversion
-  // - "." / trailing "." => user is typing decimals (do not update output yet)
-  // - value must be > 0
-  // - rounded to 2 decimals for display consistency
   private parseAmount(input: string | null): AmountParse {
     if (input == null) return { kind: 'empty' };
 
@@ -202,7 +212,6 @@ export class CurrencyConverterComponent {
 
     const normalized = text.replace(',', '.');
 
-    // allow "1." / "." while typing
     if (normalized === '.' || normalized.endsWith('.')) {
       return { kind: 'inProgress' };
     }
