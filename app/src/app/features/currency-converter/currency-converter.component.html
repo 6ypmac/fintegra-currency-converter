@@ -4,15 +4,16 @@
       <mat-label>Amount</mat-label>
       <input
         matInput
-        [formControl]="form.controls.amount"
         inputmode="decimal"
+        [value]="amountText()"
+        (input)="onAmountInput($event.target.value)"
       />
     </mat-form-field>
 
     <mat-form-field appearance="outline" class="currency">
       <mat-label>From</mat-label>
-      <mat-select [formControl]="form.controls.from">
-        @for (currency of currencies; track currency.code) {
+      <mat-select [value]="from()" (valueChange)="onFromChange($event)">
+        @for (currency of currencies(); track currency.code) {
           <mat-option [value]="currency.code">
             {{ currency.name }} ({{ currency.code }})
           </mat-option>
@@ -27,23 +28,25 @@
 
       <input
         matInput
-        [value]="result?.convertedAmount ?? null"
+        [value]="displayedResult()?.convertedAmount ?? ''"
         readonly
       />
 
       <mat-hint>
-        @if (loading) {
+        @if (conversionLoading()) {
           Updating…
-        } @else if (result) {
-          Rate: 1 {{ result.from }} = {{ result.rate | number:'1.0-6' }} {{ result.to }}
+        } @else if (displayedResult()) {
+          Rate: 1 {{ displayedResult()!.from }} =
+          {{ displayedResult()!.rate | number:'1.0-6' }}
+          {{ displayedResult()!.to }}
         }
       </mat-hint>
     </mat-form-field>
 
     <mat-form-field appearance="outline" class="currency">
       <mat-label>To</mat-label>
-      <mat-select [formControl]="form.controls.to">
-        @for (currency of currencies; track currency.code) {
+      <mat-select [value]="to()" (valueChange)="onToChange($event)">
+        @for (currency of currencies(); track currency.code) {
           <mat-option [value]="currency.code">
             {{ currency.name }} ({{ currency.code }})
           </mat-option>
@@ -51,7 +54,7 @@
       </mat-select>
     </mat-form-field>
 
-    @if (loading) {
+    @if (loading()) {
       <mat-progress-spinner
         class="spinner"
         mode="indeterminate"
@@ -61,7 +64,7 @@
     }
   </div>
 
-  @if (error) {
-    <div class="error">{{ error }}</div>
+  @if (error()) {
+    <div class="error">{{ error() }}</div>
   }
 </div>
