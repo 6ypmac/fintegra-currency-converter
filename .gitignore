@@ -51,3 +51,4 @@ app/.history/*
 # ===== System files =====
 .DS_Store
 Thumbs.db
+app/src/environments/environment.ts
